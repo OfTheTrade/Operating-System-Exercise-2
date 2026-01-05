@@ -81,9 +81,18 @@ usertrap(void)
     kexit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
-
+  // ------------------ DIT ------------------
+  if(which_dev == 2){
+    // Time is updated in clockintr()
+    
+    if((p)&&(p->state == RUNNING)){
+      int limit = 1 << (p->priority + 2);
+      if((p->active_ticks >= limit)||(higher_priority_exists(p->priority))){
+        yield();
+      }
+    }
+  }
+  // ------------------ DIT ------------------
   prepare_return();
 
   // the user page table to switch to, for trampoline.S
@@ -151,9 +160,19 @@ kerneltrap()
     panic("kerneltrap");
   }
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0)
-    yield();
+  // ------------------ DIT
+  // Give up the CPU if this is a timer interrupt.
+  if(which_dev == 2 && myproc() != 0){
+    // Time is updated in clockintr()
+    
+    struct proc *p = myproc();
+    int limit = 1 << (p->priority + 2);
+    // Check if the process has used up its time slice or if a higher priority process exists
+    if((p->active_ticks >= limit)||(higher_priority_exists(p->priority)))  {
+      yield();
+    }
+  }
+  // ------------------ DIT
 
   // the yield() may have caused some traps to occur,
   // so restore trap registers for use by kernelvec.S's sepc instruction.
@@ -169,6 +188,10 @@ clockintr()
     ticks++;
     wakeup(&ticks);
     release(&tickslock);
+
+    // ------------------ DIT ------------------
+    update_time();
+    // ------------------ DIT ------------------
   }
 
   // ask for the next timer interrupt. this also clears

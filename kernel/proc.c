@@ -124,6 +124,11 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  // ------------------ DIT ------------------
+  p->priority = 0;
+  p->active_ticks = 0;
+  p->waiting_ticks = 0;
+  // ------------------ DIT ------------------
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -290,6 +295,12 @@ kfork(void)
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
+  // ------------------ DIT ------------------
+  np->priority = 0;
+  np->active_ticks = 0;
+  np->waiting_ticks = 0;
+  // ------------------ DIT ------------------
+
   pid = np->pid;
 
   release(&np->lock);
@@ -421,46 +432,75 @@ kwait(uint64 addr)
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+
+// ------------------ DIT ------------------
 void
 scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
-
+  // We use a static pointer to remember where we were in the proc table
+  static struct proc *last_p[4] = {0}; 
+  
   c->proc = 0;
   for(;;){
-    // The most recent process to run may have had interrupts
-    // turned off; enable them to avoid a deadlock if all
-    // processes are waiting. Then turn them back off
-    // to avoid a possible race between an interrupt
-    // and wfi.
     intr_on();
-    intr_off();
-
     int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+    for(int prio = 0; prio <= 3; prio++){
+      // Start searching from where we last left off in THIS priority level
+      if(last_p[prio] == 0) last_p[prio] = proc;
+      
+      struct proc *start = last_p[prio];
+      
+      // One full scan of the proc table starting from last_p[prio]
+      for(p = start; p < &proc[NPROC]; p++){
+        if(p->state != RUNNABLE || p->priority != prio) continue;
+
+        acquire(&p->lock);
+        if(p->state == RUNNABLE && p->priority == prio){
+          p->state = RUNNING;
+          c->proc = p;
+          swtch(&c->context, &p->context);
+          c->proc = 0;
+          found = 1;
+          
+          // Remember next process to check for this priority
+          last_p[prio] = p + 1; 
+        }
+        release(&p->lock);
+        if(found) break;
       }
-      release(&p->lock);
+      
+      // If we didn't find anything from 'start' to the end, wrap around to the beginning
+      if(!found){
+        for(p = proc; p < start; p++){
+          if(p->state != RUNNABLE || p->priority != prio) continue;
+
+          acquire(&p->lock);
+          if(p->state == RUNNABLE && p->priority == prio){
+            p->state = RUNNING;
+            c->proc = p;
+            swtch(&c->context, &p->context);
+            c->proc = 0;
+            found = 1;
+            last_p[prio] = p + 1;
+          }
+          release(&p->lock);
+          if(found) break;
+        }
+      }
+      // Restart search at Priority 0
+      if(found) break; 
     }
+    
     if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
+      intr_off();
       asm volatile("wfi");
     }
   }
 }
+// ------------------ DIT ------------------
 
 // Switch to scheduler.  Must hold only p->lock
 // and have changed proc->state. Saves and restores
@@ -688,3 +728,63 @@ procdump(void)
     printf("\n");
   }
 }
+
+// ------------------ DIT ------------------
+void
+update_time(void){
+  struct proc* p;
+  for(p = proc; p < &proc[NPROC]; p++){
+    // Skip unused processes
+    if((p->state == UNUSED)||(p->state == ZOMBIE)) continue;
+    acquire(&p->lock);
+    if(p->state == RUNNING){
+      // Demotion happens here
+      p->active_ticks++;
+
+      int limit = 1 << (p->priority + 2);
+      if ((p->active_ticks >= limit)&&(p->priority < 3)){
+        // Demotion of process
+        p->priority++;
+        p->active_ticks = 0;
+        p->waiting_ticks = 0;
+      }
+    }else if(p->state == RUNNABLE){
+      // Promotion happens here
+      p->waiting_ticks++;
+      
+      int limit = 1 << (p->priority + 2);
+      if ((p->waiting_ticks > limit*10)&&(p->priority > 0)){
+        // Promotion of process
+        p->priority--; 
+        p->active_ticks = 0; 
+        p->waiting_ticks = 0;
+      }
+    }
+    release(&p->lock);
+  }
+}
+
+int
+higher_priority_exists(int current_prio)
+{
+  struct proc *p;
+
+  // If already at highest priority, no need to check
+  if(current_prio == 0)
+    return 0;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    // We use acquire/release to safely check the process state
+    acquire(&p->lock);
+    if(p->state == RUNNABLE && p->priority < current_prio){
+      release(&p->lock);
+       // Found a process with higher priority
+      return 1; 
+    }
+    release(&p->lock);
+  }
+  // Found nothing higher
+  return 0; 
+}
+
+// ------------------ DIT ------------------

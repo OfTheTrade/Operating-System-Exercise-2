@@ -107,3 +107,51 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// ------------------ DIT
+#include "pstat.h"
+#include "defs.h"
+extern struct proc proc[NPROC];
+// return info about the proccess
+uint64
+sys_getpinfo(void)
+{
+  struct pstat st;
+  struct proc* p;
+  uint64 addr;
+  int i = 0;
+  argaddr(0, &addr);
+
+  // Go through the process table
+  for (p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    
+    if(p->state != UNUSED){
+      // Update the pstat struct
+      safestrcpy(st.name[i], p->name, sizeof(p->name));
+      st.pid[i] = p->pid;
+      if (p->parent){
+        st.ppid[i] = p->parent->pid;
+      }else{
+        st.ppid[i] = 0;
+      }
+      st.priority[i] = p->priority;
+      st.size[i] = p->sz;
+      st.state[i] = p->state;
+
+    }else{
+      // Mark as to be skipped by user
+      st.pid[i] = 0;  
+    }
+
+    release(&p->lock);
+    i++;
+  }
+
+  // Return the info to user
+  if (copyout(myproc()->pagetable, addr, (char *)&st, sizeof(st)) < 0){
+    return -1;
+  }
+  return 0;
+}
+// ------------------ DIT

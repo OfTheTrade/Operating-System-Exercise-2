@@ -42,3 +42,6 @@ entry("getpid");
 entry("sbrk");
 entry("pause");
 entry("uptime");
+# ------------------ DIT ------------------
+entry("getpinfo");
+# ------------------ DIT ------------------
